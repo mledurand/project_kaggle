@@ -1,0 +1,110 @@
+---
+title: "prep_data"
+format: html
+---
+
+# Importation des library
+
+```{r}
+library(tidyverse)
+library(glmnet)
+library(lightgbm)
+library(caret)
+library(data.table)
+library(tidyr)
+```
+
+## Importation des données
+
+```{r}
+X_train <- fread("X_train.csv", stringsAsFactors=FALSE)
+y_train <- fread("y_train.csv", stringsAsFactors=TRUE)
+train_data <- merge(X_train, y_train, by = "ROW_ID")
+
+X_test <- fread("X_test.csv", stringsAsFactors=TRUE)
+```
+
+## Modification des types
+
+```{r}
+train_data$ROW_ID <- train_data$ROW_ID %>% as.factor()
+train_data$ALLOCATION <- train_data$ALLOCATION %>% as.factor()
+train_data$GROUP <- train_data$GROUP %>% as.factor()
+train_data$TS <- train_data$TS %>% as.factor()
+```
+
+## Exploration des données
+
+```{r}
+summary(X_train)
+str(X_train)
+```
+
+```{r}
+# Compter le nombre de NA par colonne
+na_counts <- sapply(train_data, function(x) sum(is.na(x)))
+# Afficher uniquement les colonnes qui ont des valeurs manquantes
+print(na_counts[na_counts > 0])
+```
+
+# Remplacement des données manquantes
+
+```{r}
+# retire SIGNED_VOLUME_1 : 387506 NA's
+train_data <- train_data %>% select(-SIGNED_VOLUME_1)
+# 1. Remplacement par 0 , NA = pas d'activité
+# L'hypothèse métier la plus logique : un rendement ou un volume manquant = 0 (pas d'activité)
+ret_vol_cols <- c(paste0("RET_", 1:20), paste0("SIGNED_VOLUME_", 2:20))
+
+train_data <- train_data %>%
+  mutate(across(all_of(ret_vol_cols), ~replace_na(., 0)))
+
+# 2. Stratégie pour la rotation médiane (MEDIAN_DAILY_TURNOVER)
+# Remplacer par 0 n'aurait pas de sens. Utiliser la médiane globale est plus sûr.
+global_turnover_median <- median(train_data$MEDIAN_DAILY_TURNOVER, na.rm = TRUE)
+
+train_data <- train_data %>%
+  mutate(MEDIAN_DAILY_TURNOVER = replace_na(MEDIAN_DAILY_TURNOVER, global_turnover_median))
+```
+
+```{r}
+summary(train_data)
+```
+
+# Analyser notre variable cible (y)
+
+```{r}
+summary(train_data$target)
+hist(train_data$target, breaks = 50, main = "Distribution de la cible")
+train_data <- train_data %>% mutate(target_binaire = ifelse(target < 0,0,1)) 
+```
+
+# 2. Traquer les valeurs aberrantes (Outliers)
+
+```{r}
+# Regarder la distribution globale de tous les rendements
+rendements <- train_data %>% select(starts_with("RET_")) %>% unlist()
+boxplot(rendements, main = "Boxplot des rendements (Recherche d'outliers)")
+# Afficher les 20 plus grandes valeurs du vecteur
+head(sort(rendements, decreasing = TRUE), 20)
+```
+
+```{r}
+# On utilise tidyr et dplyr pour transformer et filtrer les données
+valeurs_hautes <- train_data %>%
+  # On garde l'identifiant et les colonnes de rendement
+  select(ROW_ID, starts_with("RET_")) %>%
+  # On "aplatit" les données pour avoir une colonne avec la période et une avec la valeur
+  pivot_longer(cols = starts_with("RET_"), 
+               names_to = "Periode", 
+               values_to = "Rendement") %>%
+  # On filtre pour ne garder que ce qui est visiblement un outlier haut sur votre graphique
+  filter(Rendement > 0.10) %>%
+  # On trie du plus grand au plus petit
+  arrange(desc(Rendement))
+
+# Afficher le résultat
+print(valeurs_hautes)
+```
+
+# Ajout de variable (featuring Engineering)
